@@ -6,9 +6,12 @@ moves over (via `include_router`). Error-envelope handlers below mirror §3.6.
 
 from __future__ import annotations
 
+import pathlib
+
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
+from fastapi.staticfiles import StaticFiles
 from sqlalchemy.exc import DBAPIError
 
 from app.routes_listings import router as listings_router
@@ -19,6 +22,11 @@ app = FastAPI(
     description="P3 standalone slice — browse + full-text search over listings.",
 )
 app.include_router(listings_router)
+
+# Small tester UI, served from the API itself so it shares port 8000 (same origin, no
+# CORS, no build step). Visit /ui/.
+_STATIC_DIR = pathlib.Path(__file__).parent / "static"
+app.mount("/ui", StaticFiles(directory=_STATIC_DIR, html=True), name="ui")
 
 
 @app.exception_handler(HTTPException)
