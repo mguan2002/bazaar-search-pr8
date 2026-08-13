@@ -69,7 +69,8 @@ TEMPLATE = """<!doctype html>
   <div><label>price_max ($)</label><input id="pmax" type="number" min="0" placeholder="500"></div>
   <div><label>latitude</label><input id="lat" type="number" step="any" placeholder="37.7599"></div>
   <div><label>longitude</label><input id="lng" type="number" step="any" placeholder="-122.4148"></div>
-  <div><label>radius_km (max 100)</label><input id="radius" type="number" step="any" placeholder="25"></div>
+  <div><label>radius (default 25, max 100 after km conversion)</label><input id="radius" type="number" step="any" placeholder="25"></div>
+  <div><label>unit (km|mi)</label><select id="unit"><option value="km">km</option><option value="mi">mi</option></select></div>
   <div><label>limit (max 50)</label><input id="limit" type="number" min="1" max="50" value="12"></div>
   <div class="actions">
     <button class="go" id="run">Run</button>
@@ -100,20 +101,22 @@ TEMPLATE = """<!doctype html>
   function bbox(lat,lng,r){ var dLat=r/111, c=Math.cos(lat*Math.PI/180), dLng=Math.abs(c)<1e-9?180:r/(111*c);
     return {s:lat-dLat,n:lat+dLat,w:lng-Math.abs(dLng),e:lng+Math.abs(dLng)}; }
   function num(v){ return v.trim()===''?null:Number(v); }
+  function toKm(r,u){ return u==='mi'?r*1.60934:r; }
   function collect(){ return { q:$('q').value.trim(), category:$('category').value, condition:$('condition').value,
     sort:$('sort').value, pmin:num($('pmin').value), pmax:num($('pmax').value), lat:num($('lat').value),
-    lng:num($('lng').value), radius:num($('radius').value), limit:Math.max(1,Math.min(50,num($('limit').value)||12)) }; }
+    lng:num($('lng').value), radius:num($('radius').value), unit:$('unit')?$('unit').value:'km',
+    limit:Math.max(1,Math.min(50,num($('limit').value)||12)) }; }
   function validate(p){
     if(mode==='search' && p.q==='') return "query parameter 'q' is required";
-    if(p.radius!==null && !(p.radius>0 && p.radius<=100)) return 'radius_km must be between 0 and 100';
-    if((p.lat===null)!==(p.lng===null)) return 'both latitude and longitude are required for geo filtering';
+    if(p.radius!==null){ var km=toKm(p.radius,p.unit); if(!(km>0 && km<=100)) return 'radius must be <= 100 km after conversion (got '+km.toFixed(2)+' km)'; }
+    if((p.lat===null)!==(p.lng===null)) return 'latitude and longitude are required together for geo filtering';
     if(p.category!=='' && CATS.indexOf(p.category)<0) return 'invalid category';
     return null; }
-  function reqString(p){ var base = mode==='search'?'/v1/listings/search':'/v1/listings'; var q=[];
+  function reqString(p){ var base = '/v1/listings'; var q=[];
     var put=function(k,v){ if(v!==null&&v!=='') q.push(k+'='+encodeURIComponent(v)); };
     if(mode==='search') put('q',p.q); put('category',p.category); put('condition',p.condition); put('sort',p.sort);
     if(p.pmin!==null) put('price_min_cents',Math.round(p.pmin*100)); if(p.pmax!==null) put('price_max_cents',Math.round(p.pmax*100));
-    put('latitude',p.lat); put('longitude',p.lng); put('radius_km',p.radius); put('limit',p.limit); put('offset',offset);
+    put('latitude',p.lat); put('longitude',p.lng); put('radius',p.radius); put('unit',p.unit); put('limit',p.limit); put('offset',offset);
     return 'GET '+base+'?'+q.join('&'); }
   function query(p){
     var rows = DATA.filter(function(l){
@@ -121,7 +124,7 @@ TEMPLATE = """<!doctype html>
       if(p.condition && l.condition!==p.condition) return false;
       if(p.pmin!==null && l.price_cents < p.pmin*100) return false;
       if(p.pmax!==null && l.price_cents > p.pmax*100) return false;
-      if(p.lat!==null && p.lng!==null){ var b=bbox(p.lat,p.lng,p.radius===null?25:p.radius);
+      if(p.lat!==null && p.lng!==null){ var km=toKm(p.radius===null?25:p.radius, p.unit||'km'); var b=bbox(p.lat,p.lng,km);
         if(!(l.latitude>=b.s&&l.latitude<=b.n&&l.longitude>=b.w&&l.longitude<=b.e)) return false; }
       return true; });
     if(mode==='search'){
