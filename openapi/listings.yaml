@@ -1,0 +1,226 @@
+# =============================================================================
+# Bazaar — P3 Search & Discovery: OpenAPI 3.1 fragment
+#
+# Task: T282737844 (search/browse contract). P3 hands this to P2 for merge into
+# the source-of-truth spec (T282737780); P1's SDK codegen consumes the merged
+# spec. Design doc: Bazaar Search & Discovery TDD §3.2/§3.4/§3.6.
+#
+# Decisions baked in (pod doc-comment threads, 2026-08-04):
+#   - ONE endpoint: GET /v1/listings with optional q (no separate /search).
+#   - Offset pagination (cursor is the additive v1 path).
+#   - seller_user_id + status are single-value filters (Manage view calls twice
+#     if it needs both active + sold).
+#   - unit=mi accepted and converted server-side (US testers); internal math km.
+#   - distance_km returned on each listing when lat/lng are supplied.
+#   - actions[] is NOT on the list response — detail endpoint only (perf:
+#     avoids up to 50 per-item permission resolutions per page).
+#   - Error envelope {error:{code,message,request_id}} per S2 middleware.
+#
+# Naming deviations to ratify at review (flagged, not silent):
+#   1. radius + unit replaces the TDD's radius_km — a param literally named
+#      *_km cannot also accept miles. Internal computation unchanged (km).
+#   2. seller_user_id in the response aligns with the platform's opaque-user
+#      vocabulary (buyer_user_id on mark_sold) — replaces the slice's seller_id.
+# =============================================================================
+
+openapi: 3.1.0
+info:
+  title: Bazaar Search & Discovery (P3 fragment)
+  version: 0.2.0
+
+paths:
+  /v1/listings:
+    get:
+      operationId: listListings
+      summary: Browse and search listings
+      description: >
+        One endpoint for both discovery modes. When `q` is present, performs
+        full-text search ranked by relevance (ts_rank over a weighted
+        title(A)/description(B) vector, recency tie-break). When `q` is absent,
+        returns listings sorted by recency. All filters apply in both modes.
+        Geo (latitude/longitude/radius) is always a filter, never a sort.
+        Tenancy: app_id is resolved from HMAC auth middleware and scopes every
+        query — it is never accepted as a query parameter.
+      tags: [listings]
+      security:
+        - HmacAuth: []   # scheme defined in P2's root spec; placeholder below
+      parameters:
+        - name: q
+          in: query
+          required: false
+          description: >
+            Full-text query, 1–200 chars (plainto_tsquery semantics: all terms
+            ANDed, no special syntax). Presence flips the default sort from
+            `newest` to `relevance`. Missing/blank with sort=relevance is a
+            validation_error.
+          schema: { type: string, minLength: 1, maxLength: 200 }
+          example: leather couch
+        - name: latitude
+          in: query
+          required: false
+          description: Geo filter center. Must be paired with `longitude`.
+          schema: { type: number, minimum: -90, maximum: 90 }
+          example: 37.7749
+        - name: longitude
+          in: query
+          required: false
+          description: Geo filter center. Must be paired with `latitude`.
+          schema: { type: number, minimum: -180, maximum: 180 }
+          example: -122.4194
+        - name: radius
+          in: query
+          required: false
+          description: >
+            Geo filter radius in `unit` (default 25, max 100 after conversion).
+            Ignored unless latitude+longitude are supplied.
+          schema: { type: number, exclusiveMinimum: 0, maximum: 100, default: 25 }
+        - name: unit
+          in: query
+          required: false
+          description: Unit for `radius`. Converted to km server-side.
+          schema: { type: string, enum: [km, mi], default: km }
+        - name: category
+          in: query
+          required: false
+          # P2-owned enum (TDD §9 Q2) — provisional values shown.
+          schema: { type: string, enum: [furniture, electronics, apparel, baby_kids, other] }
+        - name: condition
+          in: query
+          required: false
+          schema: { type: string, enum: [new, like_new, good, fair] }
+        - name: price_min_cents
+          in: query
+          required: false
+          description: Inclusive minimum price in integer cents (10000 = $100).
+          schema: { type: integer, minimum: 0 }
+        - name: price_max_cents
+          in: query
+          required: false
+          description: Inclusive maximum price in integer cents.
+          schema: { type: integer, minimum: 0 }
+        - name: seller_user_id
+          in: query
+          required: false
+          description: >
+            Single-value seller filter (seller's Manage view). Opaque
+            integrator user id; resolved within the caller's tenant only.
+          schema: { type: string }
+        - name: status
+          in: query
+          required: false
+          description: >
+            Single-value status filter. Defaults to `active`: discovery modes
+            never return sold/removed unless explicitly requested.
+          schema: { type: string, enum: [active, sold, removed], default: active }
+        - name: sort
+          in: query
+          required: false
+          description: >
+            `relevance` is only valid when `q` is present; `newest` only when
+            `q` is absent. Default: `newest` (browse) / `relevance` (search).
+          schema: { type: string, enum: [newest, relevance, price_asc, price_desc] }
+        - name: limit
+          in: query
+          required: false
+          schema: { type: integer, minimum: 1, maximum: 50, default: 20 }
+        - name: offset
+          in: query
+          required: false
+          schema: { type: integer, minimum: 0, default: 0 }
+      responses:
+        "200":
+          description: >
+            Page of listings. A query with no matches is a 200 with
+            `data: []` and `pagination.total: 0` — never an error.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ListingsPage" }
+        "401":
+          description: Missing/stale/tampered HMAC signature (middleware).
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ErrorResponse" }
+              example: { error: { code: invalid_signature, message: "...", request_id: "req_..." } }
+        "422":
+          description: >
+            Parameter validation failure: blank q, radius out of range,
+            latitude without longitude, invalid category/condition/status/sort/
+            unit enum, or sort=relevance without q.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ErrorResponse" }
+              example: { error: { code: validation_error, message: "radius must be between 0 and 100", request_id: "req_..." } }
+        "429":
+          description: Per-app rate limit exceeded; honor retry hint (middleware).
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ErrorResponse" }
+        "503":
+          description: Database timeout — search temporarily unavailable.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ErrorResponse" }
+              example: { error: { code: search_unavailable, message: "search temporarily unavailable", request_id: "req_..." } }
+
+components:
+  schemas:
+    # Listing is P2-OWNED — reproduced here with P3's additions so the fragment
+    # is self-contained for SDK codegen review. P3 deltas: distance_km; the
+    # seller_user_id rename; NO actions field on list responses.
+    Listing:
+      type: object
+      required: [id, seller_user_id, title, description, price_cents, category, condition, status, created_at]
+      properties:
+        id: { type: integer, format: int64 }
+        seller_user_id: { type: string, description: Opaque integrator user id }
+        title: { type: string, maxLength: 200 }
+        description: { type: string }
+        price_cents: { type: integer, format: int64, minimum: 0 }
+        category: { type: string, enum: [furniture, electronics, apparel, baby_kids, other] }
+        condition: { type: string, enum: [new, like_new, good, fair] }
+        latitude: { type: [number, "null"] }
+        longitude: { type: [number, "null"] }
+        image_url: { type: [string, "null"], description: "Inline URL (TDD §9 Q3 — confirm with P2/S2)" }
+        status: { type: string, enum: [active, sold, removed] }
+        created_at: { type: string, format: date-time }
+        distance_km:
+          type: number
+          description: >
+            Great-circle distance from the requested geo center, always in km
+            regardless of `unit`. Present only when latitude+longitude were
+            supplied in the request.
+    Pagination:
+      type: object
+      required: [total, limit, offset, has_more]
+      properties:
+        total: { type: integer, minimum: 0 }
+        limit: { type: integer }
+        offset: { type: integer }
+        has_more: { type: boolean }
+    ListingsPage:
+      type: object
+      required: [data, pagination]
+      properties:
+        data:
+          type: array
+          items: { $ref: "#/components/schemas/Listing" }
+        pagination: { $ref: "#/components/schemas/Pagination" }
+    # Error envelope is S2-OWNED (T283279748) — reproduced for reference.
+    ErrorResponse:
+      type: object
+      required: [error]
+      properties:
+        error:
+          type: object
+          required: [code, message, request_id]
+          properties:
+            code: { type: string, description: "e.g. validation_error, invalid_signature, rate_limited, search_unavailable" }
+            message: { type: string }
+            request_id: { type: string }
+  securitySchemes:
+    # PLACEHOLDER for codegen completeness — real definition lives in P2's
+    # root spec: X-Bazaar-Key / X-Bazaar-Timestamp / X-Bazaar-Signature headers.
+    HmacAuth:
+      type: apiKey
+      in: header
+      name: X-Bazaar-Key

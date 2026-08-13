@@ -19,16 +19,16 @@ uv run uvicorn app.main:app --reload # http://127.0.0.1:8000/docs
 uv run python export_openapi.py      # -> openapi/listings.json (hand to P2)
 ```
 
-## Endpoints (§3.2)
+## Endpoints (§3.2, PR1 fragment T282737844, PR8 T282737884)
 
 | Method | Path | Notes |
 | --- | --- | --- |
-| GET | `/v1/listings` | Browse; recency-first; geo/category/condition/price filters; offset pagination |
-| GET | `/v1/listings/search` | Full-text search (`q` required); relevance-first (`ts_rank`), recency tie-break |
+| GET | `/v1/listings` | **Unified** browse + search (single endpoint, no separate `/search`). `q` optional — presence flips default sort newest→relevance. Filters: geo (`latitude/longitude/radius+unit=km|mi`), category/condition/price, `seller_user_id` + `status` (single-value, default active). Offset pagination, `distance_km` projected when geo supplied, always km regardless of `unit`. |
 
 `app_id` is injected by the auth layer (header `X-App-Id` in this stub), **never** a query
-param. Ranking is simple and orthogonal — geo is always a filter, never a sort (§3.4).
-Errors use the flat `{"error": "..."}` envelope from §3.6.
+param. Ranking is orthogonal — geo is always a filter, never a sort (§3.4). Newest first
+for browse, `ts_rank` relevance for search (title weight A > description B).
+Errors use S2 middleware envelope `{error:{code,message,request_id}}` (T283279748) with `X-Request-Id` header. Deprecated `GET /v1/listings/search` kept as slice-only alias (not exported).
 
 ## What's here
 
@@ -67,17 +67,19 @@ localized change (see merge path). Flag them in the pod channel:
 | P1 SDK published | Demo app swaps `fetch()` for the SDK (§4.5) | small |
 | S1 Redis live | Add a Redis cache impl behind the browse path (§3.5) | small |
 
-## Verified behavior (smoke-tested)
+## Verified behavior (PR8)
 
-Browse (recency + filters + price sort), full-text search (title weight A ranks above
-description weight B), geo bounding-box filter, offset pagination (`has_more`), and the
-full §3.6 error contract (400 missing `q`; 422 bad radius/geo/enum; 200 empty).
+- Unified `GET /v1/listings` with optional `q`, offset pagination, `has_more` stable (total order `created_at DESC, id DESC`)
+- Browse mode: recency-first + price_asc/desc, geo bounding-box + haversine exact (13km SF→Oakland trimmed), `distance_km` projected, `unit=km|mi` conversion (mi→km server-side)
+- Filters: category/condition/price_min/max inclusive, `seller_user_id` + `status` single-value (default active-only), validated enums
+- Search mode (basic): `q` → `plainto_tsquery` + `ts_rank` title A > description B, relevance default when `q` present, newest default when absent
+- Error contract: `{error:{code,message,request_id}}` with `X-Request-Id` echoed, validation `code=validation_failed` → 400, `search_unavailable` → 503
+- Schema conformance: `seller_user_id` (not `seller_id`), `distance_km` present when geo supplied else null, no `actions[]` on list
+- Tests: 35 passed — 12 geo unit (mi→km, bbox, haversine, finite guards) + 23 browse integration vs seeded fixtures (150 listings seed=42, pagination, filters, geo, mi conversion, seller/status, validation shape)
 
-## Not yet done
+## Not yet done (next PRs)
 
-- **Automated tests (§7).** Blocked by this environment's provenance guardrail
-  (unit-test assertions are 1P-only). To be authored by a 1P model / human. Behavior is
-  currently verified via manual smoke tests.
-- **Reference demo app** (Vite/React/Tailwind, §4) and **cold-tester protocol** (§4.1) —
-  next steps; the API + `openapi/listings.json` are ready to build against.
-- **Redis caching** (§3.5) — seam noted; add when S1's Redis is available.
+- **PR9** search mode §3.6 validation matrix + relevance/conformance tests (top-5 criterion TDD §1.3, zero spec drift)
+- **PR10** seed CLI + CRUD insertion + smoke test (images to MinIO path)
+- **PR11** 100K loader + EXPLAIN pass + p95 RESULTS.md
+- Reference demo app, cold-tester protocol, Redis caching (§3.5) — out of scope per P3 plan
