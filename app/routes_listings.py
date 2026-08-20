@@ -28,7 +28,8 @@ from app.db import get_session
 from app.deps import get_app_id
 from app.geo import RadiusUnit
 from app.models import CATEGORIES, Condition, ListingStatus
-from app.schemas import ListingResponse, ListingsPage, Pagination
+from app.models import Listing
+from app.schemas import ListingCreate, ListingResponse, ListingsPage, Pagination
 from app.search import (
     SORT_NEWEST,
     SORT_PRICE_ASC,
@@ -211,6 +212,51 @@ def _page(session: Session, f: ListingFilters) -> ListingsPage:
             has_more=f.offset + len(data) < total,
         ),
     )
+
+
+# ---- PR10: CRUD insertion endpoint (provisional, owned by S2 T282737576) ----
+@router.post(
+    "",
+    response_model=ListingResponse,
+    status_code=201,
+    summary="Create listing (PR10 CRUD for seed)",
+)
+def create_listing(
+    payload: ListingCreate,
+    app_id: str = Depends(get_app_id),
+    session: Session = Depends(get_session),
+) -> ListingResponse:
+    # pairwise lat/lng validation (both or neither)
+    if (payload.latitude is None) != (payload.longitude is None):
+        raise ApiError(
+            400,
+            VALIDATION_FAILED,
+            "latitude and longitude are required together",
+        )
+    try:
+        obj = Listing(
+            app_id=app_id,
+            seller_id=payload.seller_user_id,
+            title=payload.title,
+            description=payload.description,
+            price_cents=payload.price_cents,
+            category=payload.category,
+            condition=payload.condition,
+            latitude=payload.latitude,
+            longitude=payload.longitude,
+            image_url=payload.image_url,
+            status=payload.status,
+        )
+        session.add(obj)
+        session.commit()
+        session.refresh(obj)
+        return ListingResponse.from_listing(obj)
+    except ValueError as e:
+        raise ApiError(400, VALIDATION_FAILED, str(e)) from None
+    except Exception as exc:
+        raise ApiError(
+            503, "search_unavailable", "search temporarily unavailable"
+        ) from exc
 
 
 @router.get("", response_model=ListingsPage, summary="Browse/search listings (unified)")
