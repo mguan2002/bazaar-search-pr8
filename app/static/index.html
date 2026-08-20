@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1" />
-<title>Bazaar Search — Tester</title>
+<title>Bazaar Search — Tester (PR8 unified)</title>
 <style>
   :root { --bg:#0f1115; --card:#1a1e26; --line:#2a2f3a; --fg:#e6e9ef; --mut:#9aa4b2; --acc:#4f8cff; }
   * { box-sizing: border-box; }
@@ -11,7 +11,7 @@
   header { padding:14px 18px; border-bottom:1px solid var(--line); display:flex; gap:12px; align-items:baseline; }
   header h1 { font-size:16px; margin:0; }
   header .sub { color:var(--mut); font-size:12px; }
-  .wrap { display:grid; grid-template-columns:280px 1fr; gap:0; height:calc(100vh - 51px); }
+  .wrap { display:grid; grid-template-columns:300px 1fr; gap:0; height:calc(100vh - 51px); }
   .panel { padding:16px; border-right:1px solid var(--line); overflow:auto; }
   .panel label { display:block; margin:10px 0 4px; color:var(--mut); font-size:12px; }
   .panel input, .panel select { width:100%; padding:7px 8px; background:#0c0e12; color:var(--fg);
@@ -41,7 +41,7 @@
 <body>
 <header>
   <h1>Bazaar Search</h1>
-  <span class="sub">tester UI · app_id=<code>demo-app</code> · P3 §3.2</span>
+  <span class="sub">PR8 unified · GET /v1/listings?q=&lat=&lng=&radius=&unit=km|mi · seller_user_id+status · distance_km · app_id=<code>demo-app</code></span>
 </header>
 <div class="wrap">
   <form class="panel" id="form">
@@ -51,7 +51,7 @@
     </div>
 
     <div id="qwrap" style="display:none">
-      <label>q (full-text)</label>
+      <label>q (full-text, 1–200 chars)</label>
       <input id="q" placeholder="e.g. leather couch" />
     </div>
 
@@ -68,6 +68,15 @@
       <option>new</option><option>like_new</option><option>good</option><option>fair</option>
     </select>
 
+    <label>status (default active)</label>
+    <select id="status">
+      <option value="">active (default)</option>
+      <option>active</option><option>sold</option><option>removed</option>
+    </select>
+
+    <label>seller_user_id (single-value)</label>
+    <input id="seller_user_id" placeholder="e.g. seller_01" />
+
     <label>sort</label>
     <select id="sort"></select>
 
@@ -80,8 +89,12 @@
       <div><label>latitude</label><input id="latitude" type="number" step="any" /></div>
       <div><label>longitude</label><input id="longitude" type="number" step="any" /></div>
     </div>
-    <label>radius_km (default 25, max 100)</label>
-    <input id="radius_km" type="number" step="any" placeholder="25" />
+    <div class="row2">
+      <div><label>radius (default 25)</label><input id="radius" type="number" step="any" placeholder="25" /></div>
+      <div><label>unit (km|mi)</label>
+        <select id="unit"><option>km</option><option>mi</option></select>
+      </div>
+    </div>
 
     <div class="row2">
       <div><label>limit (max 50)</label><input id="limit" type="number" value="20" min="1" max="50" /></div>
@@ -90,7 +103,8 @@
 
     <button class="go" type="submit">Run</button>
     <p class="m" style="margin-top:10px">Presets:
-      <a href="#" data-preset="mission">near Mission</a> ·
+      <a href="#" data-preset="mission">near Mission (km)</a> ·
+      <a href="#" data-preset="mission-mi">near Mission (mi)</a> ·
       <a href="#" data-preset="cheap-elec">cheap electronics</a></p>
   </form>
 
@@ -111,7 +125,7 @@ let mode = "browse";
 
 const SORTS = {
   browse: [["newest","newest"],["price_asc","price ↑"],["price_desc","price ↓"]],
-  search: [["relevance","relevance"],["price_asc","price ↑"],["price_desc","price ↓"]],
+  search: [["relevance","relevance"],["newest","newest"],["price_asc","price ↑"],["price_desc","price ↓"]],
 };
 function renderSorts() {
   $("sort").innerHTML = SORTS[mode].map(([v,l]) => `<option value="${v}">${l}</option>`).join("");
@@ -125,12 +139,13 @@ function setMode(m) {
 document.querySelectorAll("#mode button").forEach(b => b.onclick = () => setMode(b.dataset.mode));
 
 function buildURL() {
-  const base = mode === "search" ? "/v1/listings/search" : "/v1/listings";
+  // PR8 unified: always /v1/listings, q optional flips default sort
+  const base = "/v1/listings";
   const p = new URLSearchParams();
   const put = (k) => { const v = $(k).value.trim(); if (v !== "") p.set(k, v); };
   if (mode === "search") put("q");
-  ["category","condition","sort","price_min_cents","price_max_cents",
-   "latitude","longitude","radius_km","limit","offset"].forEach(put);
+  ["category","condition","status","seller_user_id","sort","price_min_cents","price_max_cents",
+   "latitude","longitude","radius","unit","limit","offset"].forEach(put);
   return `${base}?${p.toString()}`;
 }
 
@@ -141,13 +156,15 @@ async function run() {
     const res = await fetch(url, { headers: { "X-App-Id": "demo-app" } });
     const data = await res.json();
     if (!res.ok) {
-      $("summary").textContent = `HTTP ${res.status}`;
+      const code = data.error ? data.error.code : res.status;
+      const reqId = data.error ? data.error.request_id : res.headers.get("x-request-id");
+      $("summary").textContent = `HTTP ${res.status} code=${code} req=${reqId}`;
       out.innerHTML = `<div class="err">HTTP ${res.status}\n${JSON.stringify(data, null, 2)}</div>`;
       $("prev").disabled = $("next").disabled = true;
       return;
     }
     const pg = data.pagination;
-    $("summary").textContent = `${pg.total} results · showing ${data.data.length} · offset ${pg.offset} · ${url}`;
+    $("summary").textContent = `${pg.total} results · showing ${data.data.length} · offset ${pg.offset} · has_more=${pg.has_more} · ${url}`;
     $("prev").disabled = pg.offset <= 0;
     $("next").disabled = !pg.has_more;
     out.innerHTML = `<div class="grid">` + data.data.map(x => `
@@ -157,7 +174,8 @@ async function run() {
         <div class="body">
           <p class="t">${esc(x.title)}</p>
           <div class="p">$${(x.price_cents/100).toFixed(2)}</div>
-          <div class="m">${esc(x.category)} · ${esc(x.condition)}</div>
+          <div class="m">${esc(x.category)} · ${esc(x.condition)} · ${esc(x.status)}</div>
+          <div class="m">seller=${esc(x.seller_user_id)}${x.distance_km!=null ? ` · ${x.distance_km}km` : ''}</div>
         </div>
       </div>`).join("") + `</div>`;
   } catch (e) {
@@ -178,10 +196,12 @@ function step(dir) {
 document.querySelectorAll("[data-preset]").forEach(a => a.onclick = (e) => {
   e.preventDefault();
   const clear = (ids) => ids.forEach(i => $(i).value = "");
-  clear(["q","price_min_cents","price_max_cents","latitude","longitude","radius_km"]);
+  clear(["q","price_min_cents","price_max_cents","latitude","longitude","radius","seller_user_id"]);
+  $("status").value = ""; $("category").value = "";
   if (a.dataset.preset === "mission") {
-    setMode("browse"); $("category").value = "";
-    $("latitude").value = "37.7599"; $("longitude").value = "-122.4148"; $("radius_km").value = "2";
+    setMode("browse"); $("latitude").value = "37.7599"; $("longitude").value = "-122.4148"; $("radius").value = "2"; $("unit").value = "km";
+  } else if (a.dataset.preset === "mission-mi") {
+    setMode("browse"); $("latitude").value = "37.7599"; $("longitude").value = "-122.4148"; $("radius").value = "1"; $("unit").value = "mi";
   } else {
     setMode("browse"); $("category").value = "electronics"; renderSorts(); $("sort").value = "price_asc";
   }
